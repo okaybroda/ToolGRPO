@@ -10,19 +10,21 @@ import torch
 from toolgrpo.grpo_trainer import GRPOTrainer
 import os 
 from typing import Any, Union
+from dotenv import load_dotenv
 
-os.environ["VLLM_USE_V1"] = "0"
+# Load environment variables from .env file
+load_dotenv()
 
 max_seq_length = 2048 # Can increase for longer reasoning traces
 lora_rank = 64 # Larger rank = smarter, but slower
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "Qwen/Qwen2.5-32B-Instruct",
+    model_name = "Qwen/Qwen2.5-Math-1.5B-Instruct",
     max_seq_length = max_seq_length,
-    load_in_4bit = True, # False for LoRA 16bit
+    load_in_4bit = False, # False for LoRA 16bit
     fast_inference = True, # Enable vLLM fast inference
     max_lora_rank = lora_rank,
-    gpu_memory_utilization = 0.5, # Reduce if out of memory
+    gpu_memory_utilization = 0.6, # Reduce if out of memory
 )
 
 model = FastLanguageModel.get_peft_model(
@@ -159,7 +161,7 @@ class CustomTrainer(GRPOTrainer):
         return result
 
     def extract_python(self, text: str) -> list:
-        matches = re.findall(r"<python>(.*?)</python>", text, re.DOTALL)
+        matches = re.findall(r"```python\n(.*?)```", text, re.DOTALL)
         pythons = []
 
         for match in matches:
@@ -176,10 +178,10 @@ class CustomTrainer(GRPOTrainer):
                     outputs.append(result)
 
                 prompt.append(
-                    {"role": "tool", "content": "\n".join([f"<output>{s}</output>" for s in outputs])}
+                    {"role": "tool", "content": "\n".join([f"```output\n{s}\n```" for s in outputs])}
                 )
             except Exception as e:
-                prompt.append({"role": "tool", "content": f"<output>{traceback.format_exc().splitlines()[-1]}</output>"})
+                prompt.append({"role": "tool", "content": f"```output\n{traceback.format_exc().splitlines()[-1]}\n```"})
             return True
         return False
     
@@ -215,31 +217,12 @@ class CustomTrainer(GRPOTrainer):
         return super()._prepare_inputs(inputs)
     
 SYSTEM_PROMPT = """
-You are a math expert solving AIME (American Invitational Mathematics Examination) problems. 
-Use reasoning tag to think through the problem step by step. Example:
-<reasoning>
-1. First, understand what the problem is asking
-2. Break down the problem into smaller parts
-3. Apply relevant mathematical concepts
-4. Solve each part systematically
-5. Combine the results to get the final answer
-</reasoning>
+Please reason step by step, and put your final answer within \\boxed{}.
 
-Use python tag to execute code for calculations when needed. Example:
-<python>
-import math
-print(math.factorial(5))
-</python>
-
-Once you have a solid answer, use answer tag. Example:
-<answer>
-120
-</answer>
-
-Remember:
-- AIME problems often require creative problem-solving approaches
-- Show all your work and reasoning
-- The final answer should be an integer between 000 and 999
+Use Python code blocks to execute code and print the output. Example:
+```python
+print(2+3)
+```
 """
     
 def extract_hash_answer(text: str) -> str | None:
@@ -247,29 +230,36 @@ def extract_hash_answer(text: str) -> str | None:
         return None
     return text.split("####")[1].strip()
 
-def get_aime2024_questions(split="train") -> Dataset:
-    # Load math competition dataset from Hugging Face
-    data = load_dataset("math-competition", split=split)  # type: ignore
-    
-    # Filter for AIME-style problems
-    data = data.filter(lambda x: "AIME" in x["source"])  # type: ignore
-    
-    # Map the data to our required format
+def get_aime_questions(split="train") -> Dataset:
+    data = load_dataset("gneubig/aime-1983-2024")[split]  # type: ignore
     data = data.map(
         lambda x: {  # type: ignore
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": x["problem"]},
+                {"role": "user", "content": x["Question"]},
             ],
-            "answer": str(x["answer"]),  # AIME answers are integers between 000-999
+            "answer": str(x["Answer"]),
         }
     )  # type: ignore
     return data  # type: ignore
 
-dataset = get_aime2024_questions().shuffle()
+# Load AIME dataset for training
+train_dataset = get_aime_questions("train").shuffle()
+
+# Load AIME2025 subset for evaluation
+eval_dataset = load_dataset("opencompass/AIME2025", "AIME2025-I")  # type: ignore
+eval_dataset = eval_dataset.map(
+    lambda x: {  # type: ignore
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": x["question"]},
+        ],
+        "answer": str(x["answer"]),
+    }
+)  # type: ignore
 
 def extract_xml_answer(text: str) -> str:
-    match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+    match = re.search(r"\\boxed{(.*?)}", text, re.DOTALL)
 
     if match:
         return match.group(1).strip()
@@ -277,7 +267,7 @@ def extract_xml_answer(text: str) -> str:
         return ""
     
 def extract_xml_output(text: str) -> str:
-    match = re.search(r"<output>(.*?)</output>", text, re.DOTALL)
+    match = re.search(r"```output\n(.*?)```", text, re.DOTALL)
 
     if match:
         return match.group(1).strip()
@@ -288,32 +278,14 @@ def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[floa
     responses = [completion[0]["content"] for completion in completions]
     q = prompts[0][1]["content"]
     extracted_responses = [extract_xml_answer(r) for r in responses]
-    
-    # AIME answers are integers between 000-999
-    def normalize_answer(ans):
-        try:
-            # Remove any leading zeros and convert to int
-            return str(int(ans))
-        except:
-            return ""
-    
-    normalized_responses = [normalize_answer(r) for r in extracted_responses]
-    normalized_answers = [normalize_answer(a) for a in answer]
-    
-    return [3.0 if r == a else 0.0 for r, a in zip(normalized_responses, normalized_answers)]
+    return [3.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
+
 
 def int_reward_func(completions, **kwargs) -> list[float]:
     responses = [completion[0]["content"] for completion in completions]
     extracted_responses = [extract_xml_answer(r) for r in responses]
-    
-    def is_valid_aime_answer(ans):
-        try:
-            num = int(ans)
-            return 0 <= num <= 999
-        except:
-            return False
-    
-    return [0.5 if is_valid_aime_answer(r) else 0.0 for r in extracted_responses]
+    return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
+
 
 def count_xml(prompts, completion) -> float:
     text = completion
@@ -321,19 +293,12 @@ def count_xml(prompts, completion) -> float:
         text += prompts[2]['content']
 
     count = 0.0
-    # Reward detailed reasoning more heavily for AIME problems
-    if text.count("<reasoning>") >= 1:
-        count += 0.2  # Increased from 0.125
-        if text.count("</reasoning>") == text.count("<reasoning>"):
-            count += 0.2  # Increased from 0.125
-    if text.count("<answer>") == 1:
-        count += 0.1  # Decreased from 0.125
-        if text.count("</answer>") == text.count("<answer>"):
-            count += 0.1  # Decreased from 0.125
-    if text.count("<python>") >= 1:
-        count += 0.1  # Decreased from 0.125
-        if text.count("<python>") == text.count("</python>"):
-            count += 0.1  # Decreased from 0.125
+    if text.count("Let's solve this step by step:") >= 1:
+        count += 0.125
+    if text.count("\\boxed{") == 1:
+        count += 0.125
+    if text.count("```python") >= 1:
+        count += 0.125
     return count
 
 def xmlcount_reward_func(prompts, completions, **kwargs) -> list[float]:
@@ -345,32 +310,36 @@ def python_reward(prompt, completion) -> float:
 
     count = 0.0
     assistant_message = prompt[2]['content']
-    if assistant_message.count("<python>") >= 1 and assistant_message.count("</python>") >= 1:
-        count += .5
+    if assistant_message.count("```python") >= 1:
+        count += .1
         
         output = prompt[3]['content']
-        if output.count("<output>") >= 1:
+        if output.count("```output") >= 1:
             count += .5
-            if output.count("</output>") >= 1:
-                count += .5
 
-                if extract_xml_output(output):
-                    count += .5
+            if extract_xml_output(output):
+                count += .5
     return count
 
 def all_python_reward(prompts, completions, **kwargs) -> list[float]:
     return [python_reward(prompt, completion[0]['content']) for prompt, completion in zip(prompts, completions)]
 
 training_args = GRPOConfig(
+    max_completion_length=1024,
+    max_prompt_length=1024,
     logging_steps = 1,
-    per_device_train_batch_size = 4,
+    per_device_train_batch_size = 2,
     gradient_accumulation_steps = 2, # Increase to 4 for smoother training
-    num_generations = 4, # Decrease if out of memory
-    num_train_epochs = 1, # Set to 1 for a full training run
+    num_generations = 2, # Decrease if out of memory
+    num_train_epochs = 2, # Set to 1 for a full training run
     # max_steps = 250,
     save_steps = 50,
     report_to = "wandb",
-    output_dir = "outputs_32b",
+    output_dir = "outputs",
+    eval_strategy = "steps",
+    eval_steps = 50,  # Evaluate every 50 steps
+    per_device_eval_batch_size = 4,
+
 )
     
 trainer = CustomTrainer(
@@ -382,7 +351,8 @@ trainer = CustomTrainer(
         correctness_reward_func,
         all_python_reward
     ],
-    train_dataset=dataset,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
     args=training_args,
 )
 trainer.train(resume_from_checkpoint=True)
