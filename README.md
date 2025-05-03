@@ -56,7 +56,11 @@ The main implementation in `tool_grpo.py` sets up a custom trainer with the foll
 
 ## Training Issues and Challenges
 
-For detailed information about current training challenges, limitations, and mitigation strategies, please see the [Training Issues](docs/training_issues.md) document
+For detailed information about current training challenges, limitations, and mitigation strategies, please see the [Training Issues](docs/training_issues.md) document.
+
+## Training Results
+
+For preliminary training results and analysis, please see the [Training Results](docs/training_results.md)
 
 ## Future Advancements
 

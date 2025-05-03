@@ -101,11 +101,6 @@ print(4 * 5 / 4)
 ```
 Think step by step. Put final answer in \\boxed{}
 """
-    
-def extract_hash_answer(text: str) -> str | None:
-    if "####" not in text:
-        return None
-    return text.split("####")[1].strip()
 
 def get_aime_questions(split="train") -> Dataset:
     data = load_dataset("gneubig/aime-1983-2024")[split]  # type: ignore
@@ -135,7 +130,7 @@ eval_dataset = eval_dataset.map(
     }
 )  # type: ignore
 
-def extract_xml_answer(text: str) -> str:
+def extract_answer(text: str) -> str:
     match = re.search(r"\\boxed{(.*?)}", text, re.DOTALL)
 
     if match:
@@ -143,7 +138,7 @@ def extract_xml_answer(text: str) -> str:
     else:
         return ""
     
-def extract_xml_output(text: str) -> str:
+def extract_output(text: str) -> str:
     match = re.search(r"```output\n(.*?)```", text, re.DOTALL)
 
     if match:
@@ -154,17 +149,17 @@ def extract_xml_output(text: str) -> str:
 def correctness_reward_func(prompts, completions, answer, **kwargs) -> list[float]:
     responses = [completion[0]["content"] for completion in completions]
     q = prompts[0][1]["content"]
-    extracted_responses = [extract_xml_answer(r) for r in responses]
+    extracted_responses = [extract_answer(r) for r in responses]
     return [3.0 if r == a else 0.0 for r, a in zip(extracted_responses, answer)]
 
 
 def int_reward_func(completions, **kwargs) -> list[float]:
     responses = [completion[0]["content"] for completion in completions]
-    extracted_responses = [extract_xml_answer(r) for r in responses]
+    extracted_responses = [extract_answer(r) for r in responses]
     return [0.5 if r.isdigit() else 0.0 for r in extracted_responses]
 
 
-def count_xml(prompts, completion) -> float:
+def count_structure(prompts, completion) -> float:
     text = completion
     if len(prompts) >= 4:
         text += prompts[2]['content']
@@ -178,8 +173,8 @@ def count_xml(prompts, completion) -> float:
         count += 0.125
     return count
 
-def xmlcount_reward_func(prompts, completions, **kwargs) -> list[float]:
-    return [count_xml(prompt, completion[0]['content']) for prompt, completion in zip(prompts, completions)]
+def structure_reward_func(prompts, completions, **kwargs) -> list[float]:
+    return [count_structure(prompt, completion[0]['content']) for prompt, completion in zip(prompts, completions)]
 
 def python_reward(prompt, completion) -> float:
     if len(prompt) < 4:
@@ -194,7 +189,7 @@ def python_reward(prompt, completion) -> float:
         if output.count("```output") >= 1:
             count += .5
 
-            if extract_xml_output(output):
+            if extract_output(output):
                 count += .5
     return count
 
@@ -206,19 +201,19 @@ training_args = GRPOConfig(
     max_prompt_length=1024,
     logging_steps = 1,
     per_device_train_batch_size = 2,
-    gradient_accumulation_steps = 4, # Increase to 4 for smoother training
+    gradient_accumulation_steps = 4,
     num_generations = 2, # Decrease if out of memory
-    num_train_epochs = 2, # Set to 1 for a full training run
+    num_train_epochs = 2, 
     # max_steps = 250,
     save_steps = 50,
     report_to = "wandb",
     output_dir = "outputs",
     eval_strategy = "steps",
     eval_steps = 50,
-    learning_rate = 2e-5,             # Adjusted learning rate
-    warmup_ratio = 0.1,               # Added warmup
-    weight_decay = 0.01,              # Added weight decay
-    max_grad_norm = 1.0,              # Added gradient clipping
+    learning_rate = 2e-5,             
+    warmup_ratio = 0.1,              
+    weight_decay = 0.01,              
+    max_grad_norm = 1.0,              
     eval_on_start=True,
 )
     
@@ -226,7 +221,7 @@ trainer = CustomTrainer(
     model=model,
     processing_class=tokenizer,
     reward_funcs=[
-        xmlcount_reward_func,
+        structure_reward_func,
         int_reward_func,
         correctness_reward_func,
         all_python_reward
