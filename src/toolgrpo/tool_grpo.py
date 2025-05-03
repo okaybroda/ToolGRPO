@@ -19,6 +19,7 @@ lora_rank = 128 # Larger rank = smarter, but slower
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name = "Qwen/Qwen2.5-0.5B-Instruct",
     # model_name = "Qwen/Qwen3-0.6B",
+    # model_name="google/gemma-3-1b-it",
     max_seq_length = max_seq_length,
     load_in_4bit = False, # False for LoRA 16bit
     fast_inference = True, # Enable vLLM fast inference
@@ -29,6 +30,8 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 model = FastLanguageModel.get_peft_model(
     model,
     r = lora_rank, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+    lora_dropout = 0, # Supports any, but = 0 is optimized
+    bias = "none", # Supports any, but = "none" is optimized
     target_modules = [
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",
@@ -89,30 +92,14 @@ class CustomTrainer(GRPOTrainer):
                 print(e)
                 pass
 
-            print(messages[-1])
-
-            # messages.append(
-            #     {
-            #         "role": "system",
-            #         "content": SECOND_SYSTEM_PROMPT,
-            #     }
-            # )
-
         return super()._prepare_inputs(inputs)
     
 SYSTEM_PROMPT = """
-Use Python code blocks for computations
+Use Python code blocks for computations. Use imports (math, numpy, sympy) if needed. Example:
 ```python
-import numpy as np
-import math
-import sympy as sp
-x = sp.Symbol('x')
-f = x**2 + math.pi * x
-x_vals = np.linspace(-2, 2, 5)
-y_vals = [float(f.subs(x, val)) for val in x_vals]
-print(np.array(y_vals))
+print(4 * 5 / 4)
 ```
-Think step by step. Put final answer within \\boxed{}
+Think step by step. Put final answer in \\boxed{}
 """
     
 def extract_hash_answer(text: str) -> str | None:

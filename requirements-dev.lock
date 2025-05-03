@@ -559,7 +559,7 @@ tyro==0.9.19
     # via unsloth-zoo
 tzdata==2025.2
     # via pandas
-unsloth==2025.4.4
+unsloth==2025.4.7
     # via toolgrpo
 unsloth-zoo==2025.4.4
     # via unsloth
